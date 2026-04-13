@@ -41,7 +41,28 @@ const FIREBASE_AUTH_DOMAIN = process.env.FIREBASE_AUTH_DOMAIN || "";
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "";
 
 // Temporary auth code → Firebase ID token mapping (in-memory, expires in 5 min)
-const authCodes = new Map<string, { idToken: string; expiresAt: number }>();
+const authCodes = new Map<string, { idToken: string; clientId: string; expiresAt: number }>();
+
+/**
+ * Decode the MCP client name from a DCR-issued client_id of the shape
+ * `acp-mcp-v1-<b64url(name)>-<random>`. Returns "MCP Client" for any
+ * unrecognised shape (older registrations, manual client IDs, etc).
+ */
+function clientNameFromId(clientId: string): string {
+  if (!clientId || !clientId.startsWith("acp-mcp-v1-")) return "MCP Client";
+  const rest = clientId.slice("acp-mcp-v1-".length);
+  const lastDash = rest.lastIndexOf("-");
+  if (lastDash <= 0) return "MCP Client";
+  const nameB64 = rest.slice(0, lastDash);
+  try {
+    const b64 = nameB64.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = b64 + "=".repeat((4 - (b64.length % 4)) % 4);
+    const decoded = Buffer.from(padded, "base64").toString("utf8");
+    return decoded.replace(/[^\x20-\x7e]/g, "").slice(0, 64).trim() || "MCP Client";
+  } catch {
+    return "MCP Client";
+  }
+}
 setInterval(() => {
   const now = Date.now();
   for (const [code, entry] of authCodes) {
@@ -145,14 +166,30 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     return wellKnownOauthProtectedResourcev2(req, res);
   }
 
-  // ---- DCR: issue a synthetic client_id per registration ----
-  // The /token exchange doesn't validate client_id against any store —
-  // auth happens via Firebase at /authorize. We just need a non-empty
-  // value so MCP clients accept the registration response.
+  // ---- DCR: encode client_name into the issued client_id ----
+  // Stateless attribution: the client's self-reported name (per RFC 7591)
+  // is b64url-encoded into the client_id so /token can decode it without
+  // any shared store, then tag the minted gsk_ key with that name.
+  // Shape: acp-mcp-v1-<b64url(client_name)>-<random>. Name is capped at
+  // 64 chars and stripped of anything non-printable.
   if (method === "POST" && path === "/register") {
     setCorsHeaders(res, true);
+    const body = (typeof req.body === "object" && req.body) || {};
+    const rawName = typeof body.client_name === "string" ? body.client_name : "";
+    const cleanName = rawName
+      .replace(/[^\x20-\x7e]/g, "") // printable ASCII only
+      .slice(0, 64)
+      .trim() || "MCP Client";
+    const nameB64 = Buffer.from(cleanName, "utf8")
+      .toString("base64")
+      .replace(/=+$/, "")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_");
+    const rand = crypto.randomBytes(6).toString("hex");
+    const clientId = `acp-mcp-v1-${nameB64}-${rand}`;
+    console.log("[oauth:register]", { clientName: cleanName, clientId });
     res.status(200).json({
-      client_id: `acp-mcp-${crypto.randomBytes(8).toString("hex")}`,
+      client_id: clientId,
       token_endpoint_auth_method: "none",
     });
     return;
@@ -215,6 +252,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     const redirectUri = qs.get("redirect_uri") || "";
     const state = qs.get("state") || "";
     const codeChallenge = qs.get("code_challenge") || "";
+    const clientId = qs.get("client_id") || "";
 
     if (!isAllowedRedirect(redirectUri)) {
       console.warn("[oauth:authorize] rejected redirect_uri", { redirectUri });
@@ -245,6 +283,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     const safeRedirect = jsString(redirectUri);
     const safeState = jsString(state);
     const safeChallenge = jsString(codeChallenge);
+    const safeClientId = jsString(clientId);
 
     // Serve a login page with Firebase Auth
     const html = `<!DOCTYPE html>
@@ -292,7 +331,8 @@ export async function toolGatewayImpl(req: Request, res: Response) {
         body: JSON.stringify({
           id_token: idToken,
           code_challenge: ${safeChallenge},
-          state: ${safeState}
+          state: ${safeState},
+          client_id: ${safeClientId}
         })
       });
       const data = await resp.json();
@@ -320,7 +360,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
   // ---- OAuth: auth code generation (called from login page) ----
   if (method === "POST" && path === "/auth/code") {
     setCorsHeaders(res, true);
-    const { id_token } = req.body || {};
+    const { id_token, client_id: bodyClientId } = req.body || {};
     if (!id_token || typeof id_token !== "string") {
       res.status(400).json({ error: "missing id_token" });
       return;
@@ -338,8 +378,10 @@ export async function toolGatewayImpl(req: Request, res: Response) {
 
     // Generate a random auth code and store the mapping
     const code = crypto.randomBytes(32).toString("hex");
+    const clientIdForCode = typeof bodyClientId === "string" ? bodyClientId : "";
     authCodes.set(code, {
       idToken: id_token,
+      clientId: clientIdForCode,
       expiresAt: Date.now() + 5 * 60 * 1000, // 5 min
     });
 
@@ -386,9 +428,9 @@ export async function toolGatewayImpl(req: Request, res: Response) {
 
     // Exchange the Firebase ID token for a per-user ACP `gsk_` key.
     // The ACP backend auto-provisions a workspace on first login and mints
-    // a fresh key named "MCP Server (auto)". Returning that as the OAuth
-    // access_token gives us true per-tenant attribution: subsequent tool
-    // calls carry the user's own key, not a shared service credential.
+    // a fresh key tagged with the MCP client name we decoded from the
+    // client_id issued at /register.
+    const mcpClient = clientNameFromId(entry.clientId);
     const acpApiBase = process.env.ACP_API_BASE || "https://api.agenticcontrolplane.com";
     try {
       const provRes = await fetch(`${acpApiBase}/plugin/mcp-provision`, {
@@ -397,7 +439,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
           Authorization: `Bearer ${entry.idToken}`,
           "Content-Type": "application/json",
         },
-        body: "{}",
+        body: JSON.stringify({ mcpClient }),
       });
 
       if (!provRes.ok) {
@@ -417,7 +459,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
         return;
       }
 
-      console.log("[oauth:token] provisioned", { workspace: provData.workspace, isNew: !!provData.isNew });
+      console.log("[oauth:token] provisioned", { workspace: provData.workspace, isNew: !!provData.isNew, mcpClient });
 
       res.status(200).json({
         access_token: provData.apiKey,

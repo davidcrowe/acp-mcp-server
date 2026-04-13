@@ -51,11 +51,13 @@ function getBearerToken(req: Request): string {
 }
 
 function detectClient(req: Request): string {
+  // Only used as a last-resort fallback. The authoritative MCP client
+  // identity is tagged onto the gsk_ key itself at /token exchange time
+  // and read by the backend's hookGovernance — this UA-based sniffing
+  // stays as a hint for legacy callers and debug logs.
   const ua = req.header("user-agent") || "";
   if (ua.includes("Claude-User") || ua.includes("python-httpx")) return "Claude";
   if (ua.includes("aiohttp") || ua.includes("OpenAI")) return "ChatGPT";
-  const token = getBearerToken(req);
-  if (token.startsWith("gsk_")) return "Lovable";
   return "MCP Client";
 }
 
