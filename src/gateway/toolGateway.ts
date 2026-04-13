@@ -383,13 +383,52 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     // Single use — delete immediately
     authCodes.delete(code);
 
-    // Return the Firebase ID token as the access token
-    res.status(200).json({
-      access_token: entry.idToken,
-      token_type: "Bearer",
-      expires_in: 3600,
-    });
-    return;
+    // Exchange the Firebase ID token for a per-user ACP `gsk_` key.
+    // The ACP backend auto-provisions a workspace on first login and mints
+    // a fresh key named "MCP Server (auto)". Returning that as the OAuth
+    // access_token gives us true per-tenant attribution: subsequent tool
+    // calls carry the user's own key, not a shared service credential.
+    const acpApiBase = process.env.ACP_API_BASE || "https://api.agenticcontrolplane.com";
+    try {
+      const provRes = await fetch(`${acpApiBase}/plugin/mcp-provision`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${entry.idToken}`,
+          "Content-Type": "application/json",
+        },
+        body: "{}",
+      });
+
+      if (!provRes.ok) {
+        const detail = await provRes.text().catch(() => "");
+        console.error("[oauth:token] mcp-provision failed", { status: provRes.status, detail });
+        res.status(502).json({
+          error: "server_error",
+          error_description: `Upstream provision failed (${provRes.status})`,
+        });
+        return;
+      }
+
+      const provData = (await provRes.json()) as { apiKey?: string; workspace?: string; isNew?: boolean };
+      if (!provData.apiKey || !provData.apiKey.startsWith("gsk_")) {
+        console.error("[oauth:token] mcp-provision returned no apiKey", provData);
+        res.status(502).json({ error: "server_error", error_description: "No API key returned" });
+        return;
+      }
+
+      console.log("[oauth:token] provisioned", { workspace: provData.workspace, isNew: !!provData.isNew });
+
+      res.status(200).json({
+        access_token: provData.apiKey,
+        token_type: "Bearer",
+        expires_in: 30 * 24 * 3600, // 30 days; gsk_ keys don't expire, this just paces re-auth
+      });
+      return;
+    } catch (err: any) {
+      console.error("[oauth:token] mcp-provision error", { message: err?.message });
+      res.status(502).json({ error: "server_error", error_description: "Provision request failed" });
+      return;
+    }
   }
 
   // ---- Favicon ----

@@ -126,6 +126,23 @@ export async function verifyBearer(req: Request) {
 
   const accessToken = auth.slice(7);
 
+  // ACP `gsk_` API keys are the primary token type after the OAuth /token
+  // exchange is rewired to call /plugin/mcp-provision. Accept them directly:
+  // the ACP governance API routes per tenant from the key prefix, so this
+  // server doesn't need to do any identity work beyond confirming the shape.
+  if (accessToken.startsWith("gsk_")) {
+    const parts = accessToken.split("_");
+    const slug = parts[1] || "unknown";
+    const identity = {
+      sub: `acp:${slug}`,
+      issuer: "acp",
+      source: "acp-key" as const,
+    };
+    updateGatewayContext({ identity: { ...identity, raw: { sub: identity.sub } } });
+    if (DEBUG) console.log("[auth:acp-key] accepted", { slug });
+    return { sub: identity.sub, scope: "", permissions: [] } as any;
+  }
+
   const segments = accessToken.split(".");
   const header = segments[0] ? b64urlDecodeToJson(segments[0]) : undefined;
   if (DEBUG) console.log(

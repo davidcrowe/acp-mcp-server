@@ -3,10 +3,6 @@
 
 const ACP_API = process.env.ACP_API_BASE || "https://api.agenticcontrolplane.com";
 
-// For OAuth users (ChatGPT, Claude), their Auth0 JWT can't be used
-// directly with the governance API. Use a service-level API key as fallback.
-const ACP_SERVICE_KEY = process.env.ACP_SERVICE_KEY || "";
-
 // ── Scope mapping (governance tools require no special scopes) ──────
 export const TOOL_SCOPES: Record<string, string[]> = {
   acp_check: [],
@@ -68,13 +64,11 @@ export async function executeGovernanceTool(
   args: Record<string, unknown>,
   bearerToken: string
 ): Promise<{ ok: boolean; result: string }> {
-  // Use gsk_ key directly if provided, otherwise fall back to service key
-  const governToken = bearerToken.startsWith("gsk_") ? bearerToken : (ACP_SERVICE_KEY || bearerToken);
   if (toolName === "acp_check") {
-    return acpCheck(args, governToken);
+    return acpCheck(args, bearerToken);
   }
   if (toolName === "acp_status") {
-    return acpStatus(governToken);
+    return acpStatus(bearerToken);
   }
   return { ok: false, result: `Unknown tool: ${toolName}` };
 }
