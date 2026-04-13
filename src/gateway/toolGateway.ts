@@ -145,14 +145,15 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     return wellKnownOauthProtectedResourcev2(req, res);
   }
 
-  // ---- DCR: return shared OAuth client ----
+  // ---- DCR: issue a synthetic client_id per registration ----
+  // The /token exchange doesn't validate client_id against any store —
+  // auth happens via Firebase at /authorize. We just need a non-empty
+  // value so MCP clients accept the registration response.
   if (method === "POST" && path === "/register") {
     setCorsHeaders(res, true);
-    // Return the pre-existing Auth0 client for all MCP clients
     res.status(200).json({
-      client_id: process.env.ACP_OAUTH_CLIENT_ID || "",
-      client_secret: process.env.ACP_OAUTH_CLIENT_SECRET || "",
-      token_endpoint_auth_method: "client_secret_post",
+      client_id: `acp-mcp-${crypto.randomBytes(8).toString("hex")}`,
+      token_endpoint_auth_method: "none",
     });
     return;
   }
