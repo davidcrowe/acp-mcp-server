@@ -44,6 +44,13 @@ export function mcpToolDescriptors() {
         required: ["tool_name", "tool_input"],
         additionalProperties: false,
       },
+      annotations: {
+        title: "ACP Governance Check",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
+      },
     },
     {
       name: "acp_status",
@@ -52,6 +59,13 @@ export function mcpToolDescriptors() {
         type: "object" as const,
         properties: {},
         additionalProperties: false,
+      },
+      annotations: {
+        title: "ACP Connectivity Check",
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: true,
       },
     },
   ];

@@ -1,0 +1,18 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-09-29/server.schema.json",
+  "name": "com.agenticcontrolplane/acp-mcp-server",
+  "description": "Pre-tool-use governance for AI agents. acp_check returns an allow/deny decision on any proposed tool call, enforcing per-workspace policies, PII transforms, per-tier rate limits, and audit logging.",
+  "status": "active",
+  "version": "0.2.0",
+  "repository": {
+    "url": "https://github.com/davidcrowe/acp-mcp-server",
+    "source": "github"
+  },
+  "websiteUrl": "https://agenticcontrolplane.com",
+  "remotes": [
+    {
+      "url": "https://mcp.agenticcontrolplane.com/mcp",
+      "type": "streamable-http"
+    }
+  ]
+}
