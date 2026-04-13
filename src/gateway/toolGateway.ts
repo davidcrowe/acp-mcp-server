@@ -166,15 +166,25 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     return wellKnownOauthProtectedResourcev2(req, res);
   }
 
-  // ---- DCR: encode client_name into the issued client_id ----
-  // Stateless attribution: the client's self-reported name (per RFC 7591)
-  // is b64url-encoded into the client_id so /token can decode it without
-  // any shared store, then tag the minted gsk_ key with that name.
-  // Shape: acp-mcp-v1-<b64url(client_name)>-<random>. Name is capped at
-  // 64 chars and stripped of anything non-printable.
+  // ---- DCR: RFC 7591-compliant dynamic client registration ----
+  // Echoes back the client's registration metadata (redirect_uris, grant
+  // types, etc.) because strict MCP clients reject minimal responses.
+  // The client's self-reported name is b64url-encoded into the client_id
+  // so /token can decode it without any shared store, then tag the minted
+  // gsk_ key with that name. Shape: acp-mcp-v1-<b64url(name)>-<random>.
   if (method === "POST" && path === "/register") {
     setCorsHeaders(res, true);
     const body = (typeof req.body === "object" && req.body) || {};
+    console.log("[oauth:register:req]", {
+      client_name: body.client_name,
+      redirect_uris: body.redirect_uris,
+      grant_types: body.grant_types,
+      response_types: body.response_types,
+      token_endpoint_auth_method: body.token_endpoint_auth_method,
+      scope: body.scope,
+      ua: req.headers["user-agent"],
+    });
+
     const rawName = typeof body.client_name === "string" ? body.client_name : "";
     const cleanName = rawName
       .replace(/[^\x20-\x7e]/g, "") // printable ASCII only
@@ -187,11 +197,31 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       .replace(/\//g, "_");
     const rand = crypto.randomBytes(6).toString("hex");
     const clientId = `acp-mcp-v1-${nameB64}-${rand}`;
-    console.log("[oauth:register]", { clientName: cleanName, clientId });
-    res.status(200).json({
+
+    const redirectUris = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
+    const grantTypes = Array.isArray(body.grant_types) && body.grant_types.length
+      ? body.grant_types
+      : ["authorization_code", "refresh_token"];
+    const responseTypes = Array.isArray(body.response_types) && body.response_types.length
+      ? body.response_types
+      : ["code"];
+    const scope = typeof body.scope === "string" && body.scope
+      ? body.scope
+      : "openid email profile";
+
+    const response = {
       client_id: clientId,
+      client_id_issued_at: Math.floor(Date.now() / 1000),
+      client_name: cleanName,
+      redirect_uris: redirectUris,
+      grant_types: grantTypes,
+      response_types: responseTypes,
       token_endpoint_auth_method: "none",
-    });
+      scope,
+    };
+
+    console.log("[oauth:register:resp]", { clientId, cleanName, redirectUris });
+    res.status(200).json(response);
     return;
   }
 
@@ -207,7 +237,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       response_types_supported: ["code"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["client_secret_basic", "client_secret_post"],
+      token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
     });
     return;
   }
@@ -240,7 +270,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: ["client_secret_basic", "client_secret_post"],
+      token_endpoint_auth_methods_supported: ["none", "client_secret_basic", "client_secret_post"],
       scopes_supported: ["openid", "email", "profile"],
     });
     return;
