@@ -122,10 +122,12 @@ export async function handleMcp(req: Request, res: Response) {
       return;
     }
 
-    // Prompt OAuth if token is missing or not JWT
+    // Prompt OAuth if token is missing or not an accepted shape.
+    // Accepted shapes: JWT (Firebase/Auth0) or opaque ACP `gsk_` API key.
     {
-      const { hasAuth, tokenShape } = readAuth(req);
-      if (!hasAuth || tokenShape !== "jwt") {
+      const { hasAuth, token, tokenShape } = readAuth(req);
+      const isAcpKey = token.startsWith("gsk_");
+      if (!hasAuth || (tokenShape !== "jwt" && !isAcpKey)) {
         res.setHeader("WWW-Authenticate", buildWwwAuthenticate(req) + ', error="invalid_token"');
         res.status(401).json(jsonRpcError(rpc.id ?? null, -32001, "Unauthorized"));
         return;
