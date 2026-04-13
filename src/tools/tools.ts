@@ -133,9 +133,11 @@ async function acpCheck(
   }
 }
 
-async function acpStatus(bearerToken: string): Promise<{ ok: boolean; result: string }> {
+async function acpStatus(_bearerToken: string): Promise<{ ok: boolean; result: string }> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 4000);
   try {
-    const res = await fetch(`${ACP_API}/govern/health`);
+    const res = await fetch(`${ACP_API}/govern/health`, { signal: controller.signal });
     const data = (await res.json()) as { mode?: string };
     return {
       ok: true,
@@ -143,6 +145,8 @@ async function acpStatus(bearerToken: string): Promise<{ ok: boolean; result: st
     };
   } catch {
     return { ok: false, result: "ACP: Cannot reach governance API" };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

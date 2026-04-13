@@ -40,8 +40,37 @@ const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY || "";
 const FIREBASE_AUTH_DOMAIN = process.env.FIREBASE_AUTH_DOMAIN || "";
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "";
 
-// Temporary auth code → Firebase ID token mapping (in-memory, expires in 5 min)
-const authCodes = new Map<string, { idToken: string; clientId: string; expiresAt: number }>();
+// Authorization-session store: created at /authorize, consumed at /auth/code.
+// Binds the (client_id, redirect_uri, code_challenge) that the server validated
+// at /authorize time to a server-generated nonce that flows through the login
+// page — prevents the client-side JS from tampering with any of those values.
+// In-memory only; Cloud Run is pinned to max-instances=1 for this reason.
+type AuthSession = {
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  state: string;
+  expiresAt: number;
+};
+const authSessions = new Map<string, AuthSession>();
+setInterval(() => {
+  const now = Date.now();
+  for (const [nonce, s] of authSessions) if (now > s.expiresAt) authSessions.delete(nonce);
+}, 60_000);
+
+// Temporary auth code → Firebase ID token mapping (in-memory, expires in 5 min).
+// Carries the session bindings forward to /token so PKCE + client_id +
+// redirect_uri can be verified atomically at code exchange.
+type AuthCode = {
+  idToken: string;
+  clientId: string;
+  redirectUri: string;
+  codeChallenge: string;
+  codeChallengeMethod: string;
+  expiresAt: number;
+};
+const authCodes = new Map<string, AuthCode>();
 
 /**
  * Decode the MCP client name from a DCR-issued client_id of the shape
@@ -282,6 +311,7 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     const redirectUri = qs.get("redirect_uri") || "";
     const state = qs.get("state") || "";
     const codeChallenge = qs.get("code_challenge") || "";
+    const codeChallengeMethod = (qs.get("code_challenge_method") || "plain").toLowerCase();
     const clientId = qs.get("client_id") || "";
 
     if (!isAllowedRedirect(redirectUri)) {
@@ -300,6 +330,35 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       return;
     }
 
+    if (!codeChallenge || codeChallenge.length < 32 || codeChallenge.length > 128) {
+      res.status(400).set("Content-Type", "text/html; charset=utf-8").send(
+        `<!doctype html><meta charset="utf-8"><title>Invalid request</title>` +
+          `<body style="font-family:-apple-system,sans-serif;padding:40px;max-width:560px;margin:auto">` +
+          `<h1 style="font-size:20px">PKCE required</h1>` +
+          `<p>This MCP server requires a PKCE code_challenge (43–128 chars). ` +
+          `Your OAuth client should generate one and append it to the /authorize URL.</p></body>`
+      );
+      return;
+    }
+
+    if (codeChallengeMethod !== "s256" && codeChallengeMethod !== "plain") {
+      res.status(400).send("Unsupported code_challenge_method");
+      return;
+    }
+
+    // Mint a server-side session. Only the nonce is embedded in the login
+    // page — the client-side JS cannot tamper with clientId, redirectUri,
+    // or codeChallenge because those never leave the server side.
+    const nonce = crypto.randomBytes(24).toString("hex");
+    authSessions.set(nonce, {
+      clientId,
+      redirectUri,
+      codeChallenge,
+      codeChallengeMethod,
+      state,
+      expiresAt: Date.now() + 10 * 60 * 1000, // 10 min to complete Google sign-in
+    });
+
     // Pre-escape values for safe interpolation into the JS context below.
     // JSON.stringify quotes the string and escapes \" \\ etc., but does NOT
     // escape < > or U+2028/2029 — those would let an injected </script>
@@ -312,8 +371,10 @@ export async function toolGatewayImpl(req: Request, res: Response) {
         .replace(/\u2029/g, "\\u2029");
     const safeRedirect = jsString(redirectUri);
     const safeState = jsString(state);
-    const safeChallenge = jsString(codeChallenge);
-    const safeClientId = jsString(clientId);
+    const safeNonce = jsString(nonce);
+    const safeFirebaseApiKey = jsString(FIREBASE_API_KEY);
+    const safeFirebaseAuthDomain = jsString(FIREBASE_AUTH_DOMAIN);
+    const safeFirebaseProjectId = jsString(FIREBASE_PROJECT_ID);
 
     // Serve a login page with Firebase Auth
     const html = `<!DOCTYPE html>
@@ -342,9 +403,9 @@ export async function toolGatewayImpl(req: Request, res: Response) {
 <script src="https://www.gstatic.com/firebasejs/11.0.0/firebase-auth-compat.js"></script>
 <script>
   firebase.initializeApp({
-    apiKey: "${FIREBASE_API_KEY}",
-    authDomain: "${FIREBASE_AUTH_DOMAIN}",
-    projectId: "${FIREBASE_PROJECT_ID}"
+    apiKey: ${safeFirebaseApiKey},
+    authDomain: ${safeFirebaseAuthDomain},
+    projectId: ${safeFirebaseProjectId}
   });
 
   async function signIn() {
@@ -354,15 +415,15 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       const result = await firebase.auth().signInWithPopup(provider);
       const idToken = await result.user.getIdToken();
 
-      // Send ID token to our server to get an auth code
+      // Send ID token + server-issued session nonce. The server already
+      // has the validated client_id / redirect_uri / code_challenge on
+      // file keyed by the nonce — we don't re-send them from the browser.
       const resp = await fetch("/auth/code", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           id_token: idToken,
-          code_challenge: ${safeChallenge},
-          state: ${safeState},
-          client_id: ${safeClientId}
+          nonce: ${safeNonce}
         })
       });
       const data = await resp.json();
@@ -390,11 +451,28 @@ export async function toolGatewayImpl(req: Request, res: Response) {
   // ---- OAuth: auth code generation (called from login page) ----
   if (method === "POST" && path === "/auth/code") {
     setCorsHeaders(res, true);
-    const { id_token, client_id: bodyClientId } = req.body || {};
+    const { id_token, nonce } = req.body || {};
     if (!id_token || typeof id_token !== "string") {
       res.status(400).json({ error: "missing id_token" });
       return;
     }
+    if (!nonce || typeof nonce !== "string") {
+      res.status(400).json({ error: "missing nonce" });
+      return;
+    }
+
+    // The session was created (and its bindings validated) at /authorize.
+    // If it's missing we refuse — the browser did not come from our login
+    // page, or the session expired mid-flow.
+    const session = authSessions.get(nonce);
+    if (!session || Date.now() > session.expiresAt) {
+      authSessions.delete(nonce);
+      console.warn("[oauth:code] session missing or expired", { nonceLen: nonce.length });
+      res.status(400).json({ error: "invalid_session", error_description: "Start the flow again" });
+      return;
+    }
+    // Session is single-use — consume immediately.
+    authSessions.delete(nonce);
 
     // Verify the Firebase ID token signature before trusting it
     try {
@@ -406,12 +484,14 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       return;
     }
 
-    // Generate a random auth code and store the mapping
+    // Generate a random auth code bound to the server-validated session.
     const code = crypto.randomBytes(32).toString("hex");
-    const clientIdForCode = typeof bodyClientId === "string" ? bodyClientId : "";
     authCodes.set(code, {
       idToken: id_token,
-      clientId: clientIdForCode,
+      clientId: session.clientId,
+      redirectUri: session.redirectUri,
+      codeChallenge: session.codeChallenge,
+      codeChallengeMethod: session.codeChallengeMethod,
       expiresAt: Date.now() + 5 * 60 * 1000, // 5 min
     });
 
@@ -425,21 +505,23 @@ export async function toolGatewayImpl(req: Request, res: Response) {
     setCorsHeaders(res, true);
 
     // Parse body (could be JSON or form-urlencoded)
-    let grantType = "", code = "", clientId = "", clientSecret = "";
+    let grantType = "", code = "", clientId = "", redirectUri = "", codeVerifier = "";
     if (typeof req.body === "object" && req.body !== null) {
       grantType = req.body.grant_type || "";
       code = req.body.code || "";
       clientId = req.body.client_id || "";
-      clientSecret = req.body.client_secret || "";
+      redirectUri = req.body.redirect_uri || "";
+      codeVerifier = req.body.code_verifier || "";
     } else if (typeof req.body === "string") {
       const params = new URLSearchParams(req.body);
       grantType = params.get("grant_type") || "";
       code = params.get("code") || "";
       clientId = params.get("client_id") || "";
-      clientSecret = params.get("client_secret") || "";
+      redirectUri = params.get("redirect_uri") || "";
+      codeVerifier = params.get("code_verifier") || "";
     }
 
-    console.log("[oauth:token]", { grantType, hasCode: !!code, clientId: clientId.slice(0, 10) });
+    console.log("[oauth:token]", { grantType, hasCode: !!code, clientId: clientId.slice(0, 10), hasVerifier: !!codeVerifier });
 
     if (grantType !== "authorization_code" || !code) {
       res.status(400).json({ error: "invalid_request", error_description: "Expected grant_type=authorization_code with code" });
@@ -453,8 +535,50 @@ export async function toolGatewayImpl(req: Request, res: Response) {
       return;
     }
 
-    // Single use — delete immediately
+    // Single use — delete immediately (even if validation fails below,
+    // we never want to allow this code to be retried).
     authCodes.delete(code);
+
+    // Bind client_id: the client that presented the code at /authorize
+    // must be the one redeeming it.
+    if (entry.clientId && clientId && clientId !== entry.clientId) {
+      console.warn("[oauth:token] client_id mismatch", { expected: entry.clientId.slice(0, 12), got: clientId.slice(0, 12) });
+      res.status(400).json({ error: "invalid_grant", error_description: "client_id does not match authorization request" });
+      return;
+    }
+
+    // Bind redirect_uri: required by OAuth 2.1 when redirect_uri was used
+    // at /authorize. Exact string match.
+    if (entry.redirectUri && redirectUri && redirectUri !== entry.redirectUri) {
+      console.warn("[oauth:token] redirect_uri mismatch");
+      res.status(400).json({ error: "invalid_grant", error_description: "redirect_uri does not match authorization request" });
+      return;
+    }
+
+    // Verify PKCE. We mandate code_challenge at /authorize, so entry
+    // always carries one. Require and verify code_verifier here.
+    if (!codeVerifier) {
+      res.status(400).json({ error: "invalid_request", error_description: "code_verifier required" });
+      return;
+    }
+    if (codeVerifier.length < 43 || codeVerifier.length > 128) {
+      res.status(400).json({ error: "invalid_grant", error_description: "code_verifier must be 43–128 chars" });
+      return;
+    }
+    let derived: string;
+    if (entry.codeChallengeMethod === "s256") {
+      derived = crypto.createHash("sha256").update(codeVerifier).digest("base64url");
+    } else {
+      derived = codeVerifier;
+    }
+    // Constant-time compare to avoid timing oracles.
+    const a = Buffer.from(derived);
+    const b = Buffer.from(entry.codeChallenge);
+    if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      console.warn("[oauth:token] PKCE verify failed");
+      res.status(400).json({ error: "invalid_grant", error_description: "code_verifier does not match code_challenge" });
+      return;
+    }
 
     // Exchange the Firebase ID token for a per-user ACP `gsk_` key.
     // The ACP backend auto-provisions a workspace on first login and mints
