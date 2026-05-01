@@ -1,11 +1,34 @@
 {
   "name": "@gatewaystack/acp-mcp-server",
   "version": "0.2.0",
+  "mcpName": "io.github.davidcrowe/acp-mcp-server",
   "description": "ACP governance MCP server — log and govern every tool call from Claude, ChatGPT, Lovable, and any MCP client",
   "license": "MIT",
   "author": "David Crowe <david@reducibl.com>",
+  "homepage": "https://agenticcontrolplane.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/davidcrowe/acp-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davidcrowe/acp-mcp-server/issues"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-governance",
+    "agent-governance",
+    "agentic-control-plane",
+    "acp"
+  ],
   "type": "module",
   "main": "dist/server/expressServer.js",
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
     "start": "node dist/server/expressServer.js",

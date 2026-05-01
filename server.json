@@ -1,0 +1,17 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.davidcrowe/acp-mcp-server",
+  "description": "Governance for every AI tool call. Lets Claude, ChatGPT, Cursor, Lovable, and any MCP client check tool calls against Agentic Control Plane policies — allow/deny decisions, rate limits, audit logs, identity attribution.",
+  "websiteUrl": "https://agenticcontrolplane.com",
+  "repository": {
+    "url": "https://github.com/davidcrowe/acp-mcp-server",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://mcp.agenticcontrolplane.com/mcp"
+    }
+  ]
+}
