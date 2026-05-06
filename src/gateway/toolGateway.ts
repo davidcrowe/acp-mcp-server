@@ -64,6 +64,7 @@ const ALLOWED_REDIRECT_ORIGINS = new Set<string>([
   "https://chatgpt.com",
   "https://chat.openai.com",
   "https://lovable.dev",
+  "https://api.lovable.dev",
 ]);
 
 function isAllowedRedirect(uri: string): boolean {
